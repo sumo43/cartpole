@@ -2,84 +2,102 @@ import gym
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
-env=gym.make('CartPole-v1')
-env.reset()
-MODEL_PATH = 'saved_model.pt'
-class TinyNet(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.net = torch.nn.Sequential(
-        torch.nn.Linear(6, 100),
-        torch.nn.LeakyReLU(),
-        torch.nn.Linear(100, 100),
-        torch.nn.Linear(100, 100),
-        torch.nn.LeakyReLU(),
-        torch.nn.Linear(100, 1),
-        )
-    def forward(self, x):
-        return self.net(x)
+import random
+
 """
 q(s, a) is a neural net. We randomly sample actions, and use the reward as the groundtruth for the model.
 The model here acts kind of like a monte carlo algorithm, where it learns from repeated trials
 an epoch is a single simulation
 AVERAGE STEPS BEFORE FAIL:
 random sampling: 21.4125
-naive ai: 
+ai: 60?
 """
-model=TinyNet()
-loss = torch.nn.MSELoss()
-optim = torch.optim.SGD(model.parameters(), lr=1e-6)
-tot = 0
-prev_r = 0
-prev_sa = 0
-for i in tqdm(range(1000)):
-    for j in range(1000):
-        random_action=env.action_space.sample()
-        s=F.one_hot(torch.tensor(random_action), num_classes=2)
-        observation, reward, done, info = env.step(random_action)
-        if done == True:
-            env.reset()
-            tot += j
-            break
-        sa=torch.cat([torch.tensor(observation),s])
-        if prev_r != 0:
-            # q_new = ((1-alpha) * net(prev_sa)) + alpha * (reward + argmax(q(
+
+batch_size = 4
+gamma=0.95
+env=gym.make('CartPole-v1')
+
+class Trainer:
+    memory = []
+    def remember(self, state, action, next_state, reward):
+        self.memory.append((state, action, next_state, reward))
+
+    def experience_replay(self, model, optimizer, loss):
+        if len(self.memory) < batch_size:
+            return
+        for step in random.sample(self.memory, batch_size):
+            state, action, next_state, reward = step
+            terminal = reward < 1
+
             loss.zero_grad()
-            q=model(prev_sa)
-            l = loss(torch.tensor(reward), q)
-            l.backward()
-            optim.step()
-            print(f'step {i} obs {observation} reward {reward} done? {done} info {info} loss: {l.item()}')
-        prev_r = reward
-        prev_sa = sa
-tot /= 1000
-p_tot = tot
-print('sampling from neural net...')
-tot = 0
-prev_obs = None
-# this time, we randomly sample from the neural net
-for i in tqdm(range(1000)):
-    for j in range(1000):
-        # which is better?
-        a0 = torch.tensor([0, 1])
-        a1 = torch.tensor([1, 0])
-        best_q = 0
-        if prev_obs != None:
-            q0 = model(torch.cat([prev_obs, a0]))
-            q1 = model(torch.cat([prev_obs, a1]))
-            if q0 > q1:
-                best_q = 0
+            if terminal:
+                l = loss(q, reward)
             else:
-                best_q = 1
-        else:
-            best_q = env.action_space.sample()
-        print(best_q)
-        observation, reward, done, info = env.step(best_q)
-        print(f'step {i} obs {observation} reward {reward} done? {done} info {info} loss: {l.item()}')
-        prev_obs = torch.tensor(observation)
-        if done == True:
-            env.reset()
-            tot += j
-            break
-print(tot / 1000)
-print(p_tot)
+                q = model(torch.tensor(state))[action]
+                next_q = torch.amax(model(torch.tensor(next_state)))
+                l = loss(q, reward + gamma * next_q)
+            l.backward()
+            optimizer.step()
+
+class TinyNet(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = torch.nn.Sequential(
+        torch.nn.Linear(4, 50),
+        torch.nn.LeakyReLU(),
+        torch.nn.Linear(50, 50),
+        torch.nn.LeakyReLU(),
+        torch.nn.Linear(50, 50),
+        torch.nn.LeakyReLU(),
+        torch.nn.Linear(50, 2)
+        )
+    def forward(self, x):
+        return self.net(x)
+
+def main():
+
+    NUM_EPISODES = 1000
+    gamma=.95
+
+    model=TinyNet()
+    loss = torch.nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters())
+    trainer = Trainer()
+    memory = []
+
+    for i in tqdm(range(NUM_EPISODES)):
+        state = env.reset()
+        while True:
+            loss.zero_grad()
+            random_action = env.action_space.sample()
+            next_state, reward, done, info = env.step(random_action)
+            trainer.remember(state, random_action, next_state, reward)
+            trainer.experience_replay(model, optimizer, loss)
+            if done:
+                break
+
+    test_model(model)
+
+def test_model(model):
+
+    print("Testing model...")
+    fails=0
+    for i in tqdm(range(200)):
+        state = env.reset()
+        j = 0
+        while True:
+            j += 1
+            action = torch.argmax(model(torch.tensor(state)))
+            state, reward, done, info = env.step(int(action))
+            if done:
+                print(j)
+                fails += j
+                j = 0
+                break
+
+    print(fails / 200)
+
+    
+
+if __name__ == "__main__":
+    main()
